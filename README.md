@@ -95,19 +95,6 @@ sudo systemctl status mediamtx-hls-proxy
 journalctl -u mediamtx-hls-proxy -f
 ```
 
-## GitHub Actions
-
-以下を追加済みです。
-
-- `.github/workflows/build.yml`  
-  push / pull request / 手動実行で `go test ./...` と Linux向けビルドを実行し、artifact を保存します。
-- `.github/workflows/update-deps.yml`  
-  毎週自動で `go get -u ./...` → `go mod tidy` → build を行い、差分があればPRを作成します。
-- `.github/dependabot.yml`  
-  Go modules と GitHub Actions 自体のバージョン更新を weekly でチェックします。
-
-> `update-deps.yml` で自動PRを作るため、GitHub リポジトリの **Settings > Actions > General > Workflow permissions** を **Read and write permissions** にしておくと確実です。
-
 ## 使い方
 
 - `https://cam1.example.com/index.m3u8` のように `/` 配下でplaylistを直接確認できます。

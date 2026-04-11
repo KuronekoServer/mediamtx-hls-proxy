@@ -6,10 +6,13 @@ on:
       - main
       - master
   pull_request:
+  release:
+    types:
+      - published
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -38,9 +41,22 @@ jobs:
           CGO_ENABLED: 0
         run: go build -trimpath -ldflags="-s -w" -o bin/mediamtx-hls-proxy-linux-amd64 .
 
-      - name: Upload artifact
+      - name: Generate checksum
+        if: github.event_name == 'release'
+        run: sha256sum bin/mediamtx-hls-proxy-linux-amd64 > bin/mediamtx-hls-proxy-linux-amd64.sha256
+
+      - name: Upload workflow artifact
+        if: github.event_name != 'release'
         uses: actions/upload-artifact@v7
         with:
           name: mediamtx-hls-proxy-linux-amd64
           path: bin/mediamtx-hls-proxy-linux-amd64
           if-no-files-found: error
+
+      - name: Upload release assets
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bin/mediamtx-hls-proxy-linux-amd64
+            bin/mediamtx-hls-proxy-linux-amd64.sha256
