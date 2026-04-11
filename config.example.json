@@ -1,0 +1,22 @@
+{
+  "listen_https": ":443",
+  "metrics_path": "/metrics/",
+  "cache_max_bytes": 536870912,
+  "cache_ttl_seconds": 30,
+  "domains": [
+    {
+      "host": "cam1.example.com",
+      "upstream": "http://127.0.0.1:8888/camera1/",
+      "proxy_path": "/",
+      "cert_file": "C:/certs/cam1.example.com/fullchain.pem",
+      "key_file": "C:/certs/cam1.example.com/privkey.pem"
+    },
+    {
+      "host": "cam2.example.com",
+      "upstream": "http://127.0.0.1:8888/camera2/",
+      "proxy_path": "/",
+      "cert_file": "C:/certs/cam2.example.com/fullchain.pem",
+      "key_file": "C:/certs/cam2.example.com/privkey.pem"
+    }
+  ]
+}
