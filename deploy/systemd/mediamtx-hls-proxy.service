@@ -1,0 +1,22 @@
+[Unit]
+Description=MediaMTX HLS Proxy
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/mediamtx-hls-proxy
+ExecStart=/opt/mediamtx-hls-proxy/mediamtx-hls-proxy-linux-amd64 -config /opt/mediamtx-hls-proxy/config.json
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/mediamtx-hls-proxy
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
