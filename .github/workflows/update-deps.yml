@@ -9,6 +9,9 @@ permissions:
   contents: write
   pull-requests: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   update-deps:
     runs-on: ubuntu-latest
@@ -32,6 +35,7 @@ jobs:
         run: |
           go test ./...
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/mediamtx-hls-proxy-linux-amd64 .
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/mediamtx-hls-proxy-windows-amd64.exe .
 
       - name: Create pull request
         uses: peter-evans/create-pull-request@v8
@@ -45,4 +49,4 @@ jobs:
 
             - updates Go modules
             - runs `go test ./...`
-            - builds the Linux binary
+            - builds the Linux and Windows binaries
