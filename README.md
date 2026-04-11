@@ -1,20 +1,19 @@
 # mediamtx-hls-proxy
 
-GoでTLS終端しながら、複数ドメインごとにMediaMTXのHLSをHTTPSでプロキシする軽量サーバーです。
+MediaMTXのHLSをプロキシしつつ視聴者数の予測を立てるものです。
+-# READMEはAIに一部書かせてます。
 
 ## できること
 
-- SNIで複数ドメインの証明書を切り替え
+- 複数ドメインの証明書を切り替え
 - ドメインごとに別のMediaMTX HLSパスへリバースプロキシ
-- HTTPSポートだけで待ち受け
-- `/` 配下でplaylistとsegmentを同一オリジン配信
 - `/metrics/` でPrometheus形式のmetricsを公開
 - MPEG-TS segmentをメモリキャッシュしてMediaMTXへの負荷を削減
 - ドメインごとの証明書ファイルパスを設定可能
 
 ## 前提
 
-- DNSで各ドメインがこのサーバーを向いていること
+- DNSで各ドメインが本プロキシが動作しているサーバーを向いていること
 - 各ドメインの証明書と秘密鍵をこのサーバー上で参照できること
 - MediaMTX側でHLSが有効になっていること
 
