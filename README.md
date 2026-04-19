@@ -8,7 +8,8 @@ MediaMTXのHLSをプロキシしつつ視聴者数の予測を立てるもので
 - 複数ドメインの証明書を切り替え
 - ドメインごとに別のMediaMTX HLSパスへリバースプロキシ
 - `/metrics/` でPrometheus形式のmetricsを公開
-- MPEG-TS segmentをメモリキャッシュしてMediaMTXへの負荷を削減
+- HLS playlistとsegmentをメモリキャッシュしてMediaMTXへの負荷を削減
+- 同じHLSアセットへの同時リクエストを1回の上流取得に集約
 - ドメインごとの証明書ファイルパスを設定可能
 
 ## 前提
@@ -25,7 +26,8 @@ MediaMTXのHLSをプロキシしつつ視聴者数の予測を立てるもので
 3. 各ドメインに `cert_file` と `key_file` を設定します。
 4. metricsの公開パスを変えたい場合は `metrics_path` を変更します。
 5. `cache_max_bytes` はメモリキャッシュ上限です。デフォルトは 512MB です。
-6. `cache_ttl_seconds` はMPEG-TS segmentのキャッシュ保持秒数です。
+6. `cache_ttl_seconds` は `.ts` / `.mpegts` / `.m4s` / `.mp4` のキャッシュ保持秒数です。
+7. `playlist_cache_ttl_milliseconds` は `.m3u8` の短TTLキャッシュ時間です。デフォルトは 1000ms です。
 
 ### `config.json` の例
 
@@ -35,6 +37,7 @@ MediaMTXのHLSをプロキシしつつ視聴者数の予測を立てるもので
   "metrics_path": "/metrics/",
   "cache_max_bytes": 536870912,
   "cache_ttl_seconds": 30,
+  "playlist_cache_ttl_milliseconds": 1000,
   "domains": [
     {
       "host": "cam1.example.com",
@@ -100,11 +103,12 @@ journalctl -u mediamtx-hls-proxy -f
 - segmentやpartial segmentも `/` 配下で同じようにプロキシされます。
 - `https://cam1.example.com/metrics/` でPrometheus形式のmetricsを取得できます。
 - `hls_viewers{stream="camera1"}` で、直近30秒以内にHLSを取りに来たユニークIP数を確認できます。
-- `.ts` と `.mpegts` のGETリクエストだけがメモリキャッシュ対象です。
+- `.m3u8` は短TTLで、`.ts` / `.mpegts` / `.m4s` / `.mp4` のGETリクエストは通常TTLでメモリキャッシュされます。
+- 同じURLに対する同時アクセスは、キャッシュ未作成時でも上流への取得を1本にまとめます。
 
 ## 注意点
 
 - MediaMTXが認証付きなら、このプロキシ側に認証ヘッダー付与などの追加実装が必要です。
 - `/metrics/` は各ドメインで共通に公開され、このパスだけは上流へ流さずローカルのmetricsを返します。外部公開したくない場合はFWやリバースプロキシで制限してください。
 - 取得できる主な指標はリクエスト総数、レスポンスステータス総数、処理時間、同時処理数、ストリームごとの推定視聴者数、キャッシュヒット数、キャッシュミス数、キャッシュ使用量です。
-- playlist はキャッシュしません。ライブ性を落とさず、MPEG-TS segment だけを軽くする構成です。
+- playlist のTTLを長くしすぎると追従遅延が増えます。MediaMTXへのリクエストをさらに減らしたい場合は `playlist_cache_ttl_milliseconds` を段階的に伸ばしてください。

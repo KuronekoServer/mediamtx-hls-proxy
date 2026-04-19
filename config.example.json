@@ -3,6 +3,7 @@
   "metrics_path": "/metrics/",
   "cache_max_bytes": 536870912,
   "cache_ttl_seconds": 30,
+  "playlist_cache_ttl_milliseconds": 1000,
   "domains": [
     {
       "host": "cam1.example.com",

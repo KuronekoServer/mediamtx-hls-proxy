@@ -27,11 +27,12 @@ import (
 )
 
 type config struct {
-	ListenHTTPS     string         `json:"listen_https"`
-	MetricsPath     string         `json:"metrics_path"`
-	CacheMaxBytes   int64          `json:"cache_max_bytes"`
-	CacheTTLSeconds int            `json:"cache_ttl_seconds"`
-	Domains         []domainConfig `json:"domains"`
+	ListenHTTPS                  string         `json:"listen_https"`
+	MetricsPath                  string         `json:"metrics_path"`
+	CacheMaxBytes                int64          `json:"cache_max_bytes"`
+	CacheTTLSeconds              int            `json:"cache_ttl_seconds"`
+	PlaylistCacheTTLMilliseconds int            `json:"playlist_cache_ttl_milliseconds"`
+	Domains                      []domainConfig `json:"domains"`
 }
 
 type domainConfig struct {
@@ -51,12 +52,13 @@ type site struct {
 }
 
 type app struct {
-	sites       map[string]*site
-	metricsPath string
-	metrics     *proxyMetrics
-	cache       *segmentCache
-	viewers     *viewerTracker
-	httpClient  *http.Client
+	sites            map[string]*site
+	metricsPath      string
+	metrics          *proxyMetrics
+	cache            *segmentCache
+	playlistCacheTTL time.Duration
+	viewers          *viewerTracker
+	httpClient       *http.Client
 }
 
 type proxyMetrics struct {
@@ -82,11 +84,17 @@ type viewerTracker struct {
 type segmentCache struct {
 	mu      sync.Mutex
 	entries map[string]*list.Element
+	flights map[string]*cacheFlight
 	order   *list.List
 	size    int64
 	limit   int64
 	ttl     time.Duration
 	metrics *proxyMetrics
+}
+
+type cacheFlight struct {
+	done chan struct{}
+	err  error
 }
 
 type cacheEntry struct {
@@ -106,9 +114,10 @@ type statusCapturingResponseWriter struct {
 }
 
 const (
-	defaultCacheMaxBytes   int64 = 512 * 1024 * 1024
-	defaultCacheTTLSeconds       = 30
-	activeViewerWindow           = 30 * time.Second
+	defaultCacheMaxBytes                int64 = 512 * 1024 * 1024
+	defaultCacheTTLSeconds                    = 30
+	defaultPlaylistCacheTTLMilliseconds       = 1000
+	activeViewerWindow                        = 30 * time.Second
 )
 
 func newStatusCapturingResponseWriter(writer http.ResponseWriter) *statusCapturingResponseWriter {
@@ -204,6 +213,9 @@ func applyDefaults(cfg *config) {
 	if cfg.CacheTTLSeconds == 0 {
 		cfg.CacheTTLSeconds = defaultCacheTTLSeconds
 	}
+	if cfg.PlaylistCacheTTLMilliseconds == 0 {
+		cfg.PlaylistCacheTTLMilliseconds = defaultPlaylistCacheTTLMilliseconds
+	}
 	cfg.MetricsPath = normalizeRoute(cfg.MetricsPath, false)
 
 	for index := range cfg.Domains {
@@ -227,6 +239,9 @@ func validateConfig(cfg *config) error {
 	}
 	if cfg.CacheTTLSeconds <= 0 {
 		return errors.New("cache_ttl_seconds must be greater than 0")
+	}
+	if cfg.PlaylistCacheTTLMilliseconds < 0 {
+		return errors.New("playlist_cache_ttl_milliseconds must be greater than or equal to 0")
 	}
 
 	seen := make(map[string]struct{}, len(cfg.Domains))
@@ -257,11 +272,12 @@ func validateConfig(cfg *config) error {
 
 func newApp(cfg *config) (*app, error) {
 	application := &app{
-		sites:       make(map[string]*site, len(cfg.Domains)),
-		metricsPath: cfg.MetricsPath,
-		metrics:     newProxyMetrics(),
-		viewers:     newViewerTracker(activeViewerWindow),
-		httpClient:  newUpstreamHTTPClient(),
+		sites:            make(map[string]*site, len(cfg.Domains)),
+		metricsPath:      cfg.MetricsPath,
+		metrics:          newProxyMetrics(),
+		playlistCacheTTL: time.Duration(cfg.PlaylistCacheTTLMilliseconds) * time.Millisecond,
+		viewers:          newViewerTracker(activeViewerWindow),
+		httpClient:       newUpstreamHTTPClient(),
 	}
 	application.cache = newSegmentCache(cfg.CacheMaxBytes, time.Duration(cfg.CacheTTLSeconds)*time.Second, application.metrics)
 
@@ -387,8 +403,8 @@ func (application *app) serveProxy(writer http.ResponseWriter, request *http.Req
 	application.metrics.inflight.WithLabelValues(site.host, method, proxyPath).Inc()
 	defer application.metrics.inflight.WithLabelValues(site.host, method, proxyPath).Dec()
 
-	if application.isCacheableSegmentRequest(request) {
-		if err := application.serveCachedSegment(statusWriter, request, site); err != nil {
+	if cacheTTL, ok := application.cacheTTLForRequest(request); ok {
+		if err := application.serveCachedResponse(statusWriter, request, site, cacheTTL); err != nil {
 			log.Printf("cached proxy error for %s: %v", request.Host, err)
 			if !statusWriter.wroteHead {
 				http.Error(statusWriter, "bad gateway", http.StatusBadGateway)
@@ -409,16 +425,23 @@ func (application *app) serveProxy(writer http.ResponseWriter, request *http.Req
 	application.metrics.duration.WithLabelValues(site.host, method, proxyPath).Observe(time.Since(startedAt).Seconds())
 }
 
-func (application *app) isCacheableSegmentRequest(request *http.Request) bool {
+func (application *app) cacheTTLForRequest(request *http.Request) (time.Duration, bool) {
 	if request.Method != http.MethodGet {
-		return false
+		return 0, false
 	}
 	if request.Header.Get("Range") != "" {
-		return false
+		return 0, false
 	}
 
 	extension := strings.ToLower(path.Ext(request.URL.Path))
-	return extension == ".ts" || extension == ".mpegts"
+	switch extension {
+	case ".m3u8":
+		return application.playlistCacheTTL, application.playlistCacheTTL > 0
+	case ".ts", ".mpegts", ".m4s", ".mp4":
+		return application.cache.ttl, application.cache.ttl > 0
+	default:
+		return 0, false
+	}
 }
 
 func (application *app) isViewerActivityRequest(request *http.Request) bool {
@@ -444,7 +467,7 @@ func (application *app) trackViewer(site *site, request *http.Request, now time.
 	application.viewers.Touch(stream, viewer, now)
 }
 
-func (application *app) serveCachedSegment(writer http.ResponseWriter, request *http.Request, site *site) error {
+func (application *app) serveCachedResponse(writer http.ResponseWriter, request *http.Request, site *site, ttl time.Duration) error {
 	cacheKey := buildCacheKey(site.host, request.URL)
 	if entry, ok := application.cache.Get(cacheKey); ok {
 		application.metrics.cacheHits.WithLabelValues(site.host).Inc()
@@ -452,15 +475,41 @@ func (application *app) serveCachedSegment(writer http.ResponseWriter, request *
 		return nil
 	}
 
+	flight, leader := application.cache.acquireFlight(cacheKey)
+	if !leader {
+		select {
+		case <-flight.done:
+		case <-request.Context().Done():
+			return request.Context().Err()
+		}
+
+		if entry, ok := application.cache.Get(cacheKey); ok {
+			application.metrics.cacheHits.WithLabelValues(site.host).Inc()
+			writeCachedEntry(writer, entry)
+			return nil
+		}
+		if flight.err != nil {
+			return flight.err
+		}
+
+		site.proxy.ServeHTTP(writer, request)
+		return nil
+	}
+
 	application.metrics.cacheMiss.WithLabelValues(site.host).Inc()
+	defer func() {
+		application.cache.releaseFlight(cacheKey, flight)
+	}()
 
 	upstreamRequest, err := newUpstreamRequest(request, site)
 	if err != nil {
+		flight.err = err
 		return err
 	}
 
 	response, err := application.httpClient.Do(upstreamRequest)
 	if err != nil {
+		flight.err = err
 		return err
 	}
 	defer response.Body.Close()
@@ -470,6 +519,7 @@ func (application *app) serveCachedSegment(writer http.ResponseWriter, request *
 
 	body, err := streamResponseWithOptionalCache(writer, response.Body, application.cache.limit)
 	if err != nil {
+		flight.err = err
 		return err
 	}
 
@@ -481,7 +531,7 @@ func (application *app) serveCachedSegment(writer http.ResponseWriter, request *
 			header:     cloneHeader(response.Header),
 			body:       body,
 			size:       int64(len(body)),
-			expiresAt:  time.Now().Add(application.cache.ttl),
+			expiresAt:  time.Now().Add(ttl),
 		}
 		if application.cache.Set(entry) {
 			application.metrics.cacheFill.WithLabelValues(site.host).Inc()
@@ -700,6 +750,7 @@ func cloneHeader(header http.Header) http.Header {
 func newSegmentCache(limit int64, ttl time.Duration, metrics *proxyMetrics) *segmentCache {
 	cache := &segmentCache{
 		entries: make(map[string]*list.Element),
+		flights: make(map[string]*cacheFlight),
 		order:   list.New(),
 		limit:   limit,
 		ttl:     ttl,
@@ -817,6 +868,32 @@ func (cache *segmentCache) Set(entry *cacheEntry) bool {
 	return true
 }
 
+func (cache *segmentCache) acquireFlight(key string) (*cacheFlight, bool) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+
+	if flight, ok := cache.flights[key]; ok {
+		return flight, false
+	}
+
+	flight := &cacheFlight{done: make(chan struct{})}
+	cache.flights[key] = flight
+	return flight, true
+}
+
+func (cache *segmentCache) releaseFlight(key string, flight *cacheFlight) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+
+	current, ok := cache.flights[key]
+	if !ok || current != flight {
+		return
+	}
+
+	delete(cache.flights, key)
+	close(flight.done)
+}
+
 func (cache *segmentCache) removeElement(element *list.Element) {
 	entry := element.Value.(*cacheEntry)
 	delete(cache.entries, entry.key)
@@ -857,23 +934,23 @@ func newProxyMetrics() *proxyMetrics {
 		}, []string{"stream"}),
 		cacheHits: promauto.NewCounterVec(prometheus.CounterOpts{
 			Name: "mediamtx_hls_proxy_cache_hits_total",
-			Help: "Total number of cache hits for MPEG-TS segments.",
+			Help: "Total number of cache hits for cached HLS responses.",
 		}, []string{"host"}),
 		cacheMiss: promauto.NewCounterVec(prometheus.CounterOpts{
 			Name: "mediamtx_hls_proxy_cache_misses_total",
-			Help: "Total number of cache misses for MPEG-TS segments.",
+			Help: "Total number of cache misses that reached the upstream HLS server.",
 		}, []string{"host"}),
 		cacheFill: promauto.NewCounterVec(prometheus.CounterOpts{
 			Name: "mediamtx_hls_proxy_cache_store_total",
-			Help: "Total number of MPEG-TS segments stored in cache.",
+			Help: "Total number of HLS responses stored in cache.",
 		}, []string{"host"}),
 		cacheSize: promauto.NewGauge(prometheus.GaugeOpts{
 			Name: "mediamtx_hls_proxy_cache_bytes",
-			Help: "Current memory usage of the MPEG-TS cache in bytes.",
+			Help: "Current memory usage of the HLS response cache in bytes.",
 		}),
 		cacheItems: promauto.NewGauge(prometheus.GaugeOpts{
 			Name: "mediamtx_hls_proxy_cache_items",
-			Help: "Current number of cached MPEG-TS segments.",
+			Help: "Current number of cached HLS responses.",
 		}),
 		cacheEvictions: promauto.NewCounter(prometheus.CounterOpts{
 			Name: "mediamtx_hls_proxy_cache_evictions_total",
